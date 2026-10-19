@@ -1,0 +1,45 @@
+# Place at .github/workflows/aib-pilot.yml in your sandbox repository.
+name: AI Builder Pilot Fixture
+run-name: aib-pilot-${{ inputs.run_token }}-${{ inputs.mode }}
+on:
+  workflow_dispatch:
+    inputs:
+      run_token:
+        description: Unique identifier for this pilot test
+        required: true
+        type: string
+      mode:
+        description: Controlled remote outcome
+        required: true
+        type: choice
+        default: pass
+        options:
+          - pass
+          - fail
+          - slow
+permissions:
+  contents: read
+jobs:
+  fixture:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Produce a deterministic result
+        env:
+          PILOT_TOKEN: ${{ inputs.run_token }}
+          PILOT_MODE: ${{ inputs.mode }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ ! "$PILOT_TOKEN" =~ ^[A-Za-z0-9_-]{1,64}$ ]]; then
+            echo "Invalid pilot run token"
+            exit 2
+          fi
+          printf 'PILOT_RESULT token=%s mode=%s\n' "$PILOT_TOKEN" "$PILOT_MODE"
+          case "$PILOT_MODE" in
+            pass) ;;
+            fail) echo "Intentional pilot failure"; exit 1 ;;
+            slow) sleep 45 ;;
+            *) echo "Unknown pilot mode"; exit 2 ;;
+          esac
+          printf 'Pilot token: %s\n\nMode: %s\n\nOutcome: success\n' "$PILOT_TOKEN" "$PILOT_MODE" >> "$GITHUB_STEP_SUMMARY"
