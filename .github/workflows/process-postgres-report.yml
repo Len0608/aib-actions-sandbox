@@ -1,0 +1,115 @@
+name: Process PostgreSQL Report
+run-name: postgres-report-${{ inputs.run_token }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_token:
+        description: Unique identifier for this report
+        required: true
+        type: string
+      csv_data:
+        description: CSV contents exported from PostgreSQL
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  process-report:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Validate and process CSV
+        env:
+          CSV_DATA: ${{ inputs.csv_data }}
+          RUN_TOKEN: ${{ inputs.run_token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          python3 - <<'PY'
+          import csv
+          import io
+          import json
+          import os
+          import re
+          from pathlib import Path
+
+          token = os.environ["RUN_TOKEN"]
+          if not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", token):
+              raise SystemExit("Invalid run_token: use letters, digits, underscores or hyphens")
+
+          raw_csv = os.environ["CSV_DATA"]
+          reader = csv.DictReader(io.StringIO(raw_csv, newline=""), strict=True)
+
+          if reader.fieldnames != ["id", "name", "quantity"]:
+              raise SystemExit("Expected CSV header: id,name,quantity")
+
+          rows = []
+          seen_ids = set()
+
+          for line, row in enumerate(reader, start=2):
+              if None in row or any(value is None for value in row.values()):
+                  raise SystemExit(f"Incorrect number of columns at record {line}")
+
+              try:
+                  item_id = int(row["id"])
+                  quantity = int(row["quantity"])
+              except ValueError:
+                  raise SystemExit(f"ID and quantity must be integers at record {line}")
+
+              name = row["name"].strip()
+              if not name or quantity < 0:
+                  raise SystemExit(f"Empty name or negative quantity at record {line}")
+              if item_id in seen_ids:
+                  raise SystemExit(f"Duplicate ID: {item_id}")
+
+              seen_ids.add(item_id)
+              rows.append({"id": item_id, "name": name, "quantity": quantity})
+
+          if not rows:
+              raise SystemExit("The report contains no data rows")
+
+          total = sum(row["quantity"] for row in rows)
+          largest = max(rows, key=lambda row: row["quantity"])
+
+          summary = {
+              "run_token": token,
+              "status": "processed",
+              "row_count": len(rows),
+              "total_quantity": total,
+              "average_quantity": round(total / len(rows), 2),
+              "largest_item": largest,
+          }
+
+          reports = Path("reports")
+          reports.mkdir(exist_ok=True)
+          (reports / "source.csv").write_text(raw_csv, encoding="utf-8")
+          (reports / "summary.json").write_text(
+              json.dumps(summary, indent=2) + "\n",
+              encoding="utf-8",
+          )
+
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as f:
+              f.write("# PostgreSQL reporting results\n\n")
+              f.write(f"- Report: `{token}`\n")
+              f.write(f"- Records processed: **{len(rows)}**\n")
+              f.write(f"- Total quantity: **{total}**\n")
+              f.write(f"- Average quantity: **{summary['average_quantity']}**\n")
+              f.write(f"- Largest quantity: **{largest['quantity']}** "
+                      f"(item ID {largest['id']})\n")
+              f.write("\nValidation and processing completed successfully.\n")
+
+          print(json.dumps(summary, indent=2))
+          PY
+
+      - name: Upload report files
+        uses: actions/upload-artifact@v4
+        with:
+          name: postgres-report-${{ github.run_id }}
+          path: reports/
+          if-no-files-found: error
+          retention-days: 7
